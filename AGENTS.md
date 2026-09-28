@@ -1,10 +1,10 @@
 # Civ 6 MCP — Agent Reference
 
-An MCP server connecting to a live Civilization VI game via FireTuner. This fork returns player-view information and structured commands for competitive play. See [README.md](README.md) for setup and [docs/multiplayer.md](docs/multiplayer.md) for the multiplayer patch and tested support.
+An MCP server connecting to a live Civilization VI game via FireTuner. Use the MCP tools to play by the game's rules, with only information your player can see. See [README.md](README.md) for setup and [docs/multiplayer.md](docs/multiplayer.md) for multiplayer.
 
 **You only know what you explicitly query.** A human player passively absorbs the score ticker, religion lens, unit health bars — you have none of that. Information you don't ask for simply doesn't enter your world model. The patterns below exist to compensate for this.
 
-`end_turn` runs **empire warnings** automatically for loyalty crises, idle trade routes, gold deficits and resource caps. Private rival telemetry is unavailable in this fork.
+`end_turn` runs **empire warnings** automatically for loyalty crises, idle trade routes, gold deficits and resource caps.
 
 ## Coordinate System
 
@@ -14,6 +14,10 @@ An MCP server connecting to a live Civilization VI game via FireTuner. This fork
 - Moving from (9,24) to (9,26) is **south**, not north.
 
 ## Game Start
+
+If BBG is enabled, follow [the BBG rules note](docs/bbg.md) to identify the loaded
+version and read its local files. Use those rules when they differ from this
+playbook's general advice.
 
 Before your first turn:
 1. Read your civ's unique abilities, units, and buildings — what is this civ designed to do?
@@ -64,7 +68,7 @@ Periodic checks worth doing regularly. The game doesn't surface most of this pro
 
 ### Around every 20 turns:
 - `get_diplomacy` — delegations to new civs, friendships with Friendly civs, alliances if eligible
-- `get_victory_progress` — check local victory progress; rival details are currently unavailable
+- `get_victory_progress` — check your victory progress
 - `get_religion_spread` — religious victory is invisible without active checking; a rival with majority in most civs is a serious threat
 
 ### Around every 30 turns:
@@ -286,8 +290,6 @@ WC fires synchronously inside `end_turn()` — register votes **before** calling
 | Score | Highest score at turn limit | fallback |
 
 All victories trigger immediately when the condition is met — they do not wait for a turn boundary or WC session. A rival reaching 20 DVP wins before your next turn. The only counter is stripping DVP at a World Congress *before* they reach 20.
-
-Rival victory warnings and comparative demographics are currently unavailable in the local player-view fork.
 
 ## Game Recovery
 

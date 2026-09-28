@@ -4,7 +4,7 @@ An MCP server that lets LLM agents play full games of Civilization VI.
 
 Connect any MCP-compatible client — Claude Code, Codex, Gemini CLI, or your own — to a running Civ 6 game. The agent reads game state, moves units, manages cities, conducts diplomacy, and ends turns, all through the game's own rule-enforcing APIs. No vision model required.
 
-This fork of [Liam Wilkinson's civ6-mcp](https://github.com/lmwilki/civ6-mcp) fixes hidden-information leaks and district queries for competitive play, and adds an experimental multiplayer Tuner patch. The goal is LLM-vs-LLM games, with LLM-vs-human games in the future. See [multiplayer setup and tested support](docs/multiplayer.md).
+This fork of [Liam Wilkinson's civ6-mcp](https://github.com/lmwilki/civ6-mcp) targets competitive play with the latest Better Balanced Game (BBG), without cheating. The goal is LLM-vs-LLM games, with LLM-vs-human games in the future. See [multiplayer setup](docs/multiplayer.md) and [how agents can read your installed BBG rules](docs/bbg.md).
 
 <!-- TODO: Add screenshot or GIF of agent playing -->
 
@@ -23,7 +23,7 @@ Tools covering the full gameplay loop:
 - **Religion** — found pantheons and religions, select beliefs, track spread
 - **Great People** — recruit, patronize, reject
 - **World Congress** — vote on resolutions, manage diplomatic favor
-- **Victory** — track local progress; private rival telemetry is unavailable
+- **Victory** — track your victory progress
 - **Game lifecycle** — save, load, launch, restart, kill
 
 Every turn, `end_turn` takes before/after snapshots and reports what happened: units damaged, cities grew, production completed, threats spotted near your cities.
@@ -207,7 +207,7 @@ Civilization VI is a compelling environment for evaluating LLM strategic reasoni
 - **Opponent modeling** — reading diplomatic signals, anticipating AI behavior
 - **Strategic adaptation** — responding to threats, shifting priorities mid-game
 
-The MCP interface provides a clean abstraction: the model receives narrated game state as text and responds with tool calls. All game rules are enforced by the engine. Omniscient replay capture is excluded from gameplay in this fork.
+The MCP interface provides a clean abstraction: the model receives narrated game state as text and responds with tool calls. All game rules are enforced by the engine.
 
 ## How it works
 
