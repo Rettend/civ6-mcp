@@ -12,69 +12,12 @@ from civ_mcp.lua.models import (
 
 
 def build_victory_proximity_query() -> str:
-    """InGame: lightweight check for foreign victory threats. Safe for every turn."""
-    return (
-        """
-local me = Game.GetLocalPlayer()
-local pDiplo = Players[me]:GetDiplomacy()
-local relCount = {}
-local relOwner = {}
-local totalMajors = 0
-for i = 0, 62 do
-    local p = Players[i]
-    if p and p:IsMajor() and p:IsAlive() then
-        totalMajors = totalMajors + 1
-        local majRel = p:GetReligion():GetReligionInMajorityOfCities()
-        if majRel >= 0 then
-            relCount[majRel] = (relCount[majRel] or 0) + 1
-            if not relOwner[majRel] then
-                local creator = -1
-                for j = 0, 62 do
-                    if Players[j] and Players[j]:IsAlive() and Players[j]:GetReligion():GetReligionTypeCreated() == majRel then creator = j end
-                end
-                if creator >= 0 and creator ~= me then
-                    local rEntry = GameInfo.Religions[majRel]
-                    local relName = rEntry and Locale.Lookup(rEntry.Name) or "Unknown"
-                    if pDiplo:HasMet(creator) then
-                        local cfg = PlayerConfigurations[creator]
-                        relOwner[majRel] = Locale.Lookup(cfg:GetCivilizationShortDescription()) .. "|" .. relName
-                    else
-                        relOwner[majRel] = "Unknown civilization|" .. relName
-                    end
-                end
-            end
-        end
-        if i ~= me and pDiplo:HasMet(i) then
-            local okDvp, dvp = pcall(function() return p:GetStats():GetDiplomaticVictoryPoints() end)
-            if okDvp and dvp and dvp >= 10 then
-                local cfg = PlayerConfigurations[i]
-                print("DIPLO_THREAT|" .. Locale.Lookup(cfg:GetCivilizationShortDescription()) .. "|" .. dvp)
-            end
-            local okSvp, svp = pcall(function() return p:GetStats():GetScienceVictoryPoints() end)
-            if okSvp and svp and svp > 0 then
-                local cfg = PlayerConfigurations[i]
-                local needed = 50
-                pcall(function() needed = p:GetStats():GetScienceVictoryPointsTotalNeeded() end)
-                print("SCI_THREAT|" .. Locale.Lookup(cfg:GetCivilizationShortDescription()) .. "|" .. svp .. "|" .. needed)
-            end
-        end
-    end
-end
-for relId, count in pairs(relCount) do
-    if relOwner[relId] then
-        print("REL_THREAT|" .. relOwner[relId] .. "|" .. count .. "|" .. totalMajors)
-    end
-end
-"""
-        + _LUA_VICTORY_ENABLED
-        + """
-print("{SENTINEL}")
-"""
-    ).replace("{SENTINEL}", SENTINEL)
+    """Rival threat details are unavailable; retain victory-enabled metadata."""
+    return _LUA_VICTORY_ENABLED + f'\nprint("{SENTINEL}")'
 
 
 def build_victory_progress_query() -> str:
-    """Build a Lua query for victory progress of all players (InGame context).
+    """Build a Lua query for local victory progress (InGame context).
 
     Outputs lines:
       PLAYER|pid|name|score|sciVP|sciNeeded|diploVP|tourism|milStr|techs|civics|relCities|staycationers|hasReligion
@@ -90,7 +33,7 @@ local pCul = Players[me]:GetCulture()
 local dPop, dMil, dFood, dGold, dLand, dProd = {{}}, {{}}, {{}}, {{}}, {{}}, {{}}
 for i = 0, 62 do
     local p = Players[i]
-    if p and p:IsMajor() and p:IsAlive() then
+    if i == me and p and p:IsMajor() and p:IsAlive() then
         local met = pDiplo:HasMet(i) or i == me
         if met then
             local cfg = PlayerConfigurations[i]
@@ -251,12 +194,7 @@ local function emitDemo(label, arr)
     local avg = total / #arr
     print("DEMO|" .. label .. "|" .. myRank .. "|" .. string.format("%.1f", myVal) .. "|" .. string.format("%.1f", best) .. "|" .. string.format("%.1f", avg) .. "|" .. string.format("%.1f", worst))
 end
-emitDemo("Population", dPop)
-emitDemo("Soldiers", dMil)
-emitDemo("CropYield", dFood)
-emitDemo("GNP", dGold)
-emitDemo("Land", dLand)
-emitDemo("Goods", dProd)
+-- Comparative demographics are not player-view information.
 local nMajors = 0
 local nRels = 0
 for i = 0, 62 do

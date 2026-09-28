@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import replace
 
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,8 @@ class GameState:
 
     def __init__(self, connection: GameConnection):
         self.conn = connection
+        self._map_memory: dict[tuple[int, int], lq.TileInfo] = {}
+        self._map_context: tuple[str, str, int] | None = None
         self.spatial: SpatialTracker | None = None
         self._last_snapshot: lq.TurnSnapshot | None = None
         self._game_identity: tuple[str, int] | None = None  # (civ_type, seed)
@@ -86,6 +89,8 @@ class GameState:
                 if self._game_identity is not None and new_id != self._game_identity:
                     log.info("Game changed: %s → %s", self._game_identity, new_id)
                     self._last_snapshot = None
+                    self._map_memory.clear()
+                    self._map_context = None
                     self._diary_written_turn = None
                     self._last_game_over = None
                     self._save_load_history = []
@@ -118,9 +123,8 @@ class GameState:
         return lq.parse_diary_full_response(lines)
 
     async def get_rival_snapshot(self) -> list[lq.RivalSnapshot]:
-        """Lightweight per-rival stats for diary entries."""
-        lines = await self.conn.execute_write(lq.build_rival_snapshot_query())
-        return lq.parse_rival_snapshot_response(lines)
+        """Private rival telemetry is not available to gameplay consumers."""
+        return []
 
     async def check_game_over(self) -> lq.GameOverStatus | None:
         """Check if the game has ended (victory/defeat screen showing).
@@ -169,7 +173,7 @@ class GameState:
         return _action_result(lines)
 
     async def get_threat_scan(self) -> list[lq.ThreatInfo]:
-        lines = await self.conn.execute_read(lq.build_threat_scan_query())
+        lines = await self.conn.execute_write(lq.build_threat_scan_query())
         return lq.parse_threat_scan_response(lines)
 
     async def get_pathing_estimate(
@@ -188,13 +192,40 @@ class GameState:
         lines = await self.conn.execute_write(lq.build_cities_query())
         return lq.parse_cities_response(lines)
 
+    async def get_district_costs(self, city_id: int) -> dict:
+        from civ_mcp.lua.district_costs import build_district_costs_query, parse_district_costs
+
+        lines = await self.conn.execute_write(build_district_costs_query(city_id))
+        return parse_district_costs(lines)
+
     async def get_map_area(
         self, center_x: int, center_y: int, radius: int = 2
     ) -> list[lq.TileInfo]:
-        lines = await self.conn.execute_read(
+        lines = await self.conn.execute_write(
             lq.build_map_area_query(center_x, center_y, radius)
         )
-        return lq.parse_map_response(lines)
+        meta = next((line.split("|") for line in lines if line.startswith("VIEW|")), None)
+        if meta is None or len(meta) != 4:
+            raise ValueError("Map query did not return its player/turn identity")
+        context = (meta[1], meta[3], int(float(meta[2])))
+        previous = self._map_context
+        if previous and (context[:2] != previous[:2] or context[2] < previous[2]):
+            self._map_memory.clear()
+        self._map_context = context
+        tiles = lq.parse_map_response(lines)
+        for tile in tiles:
+            tile.observed_turn = context[2]
+            self._map_memory[(tile.x, tile.y)] = tile
+        for line in lines:
+            if not line.startswith("FOG|"):
+                continue
+            x, y = map(int, line.split("|", 1)[1].split(","))
+            remembered = self._map_memory.get((x, y))
+            if remembered:
+                tiles.append(replace(remembered, visibility="revealed", units=None, own_units=None))
+            else:
+                tiles.append(lq.TileInfo(x, y, "UNKNOWN", None, None, False, False, False, None, -1, visibility="revealed"))
+        return sorted(tiles, key=lambda tile: (tile.y, tile.x))
 
     async def get_strategic_map(self) -> lq.StrategicMapData:
         lines = await self.conn.execute_read(lq.build_strategic_map_query())
@@ -283,7 +314,7 @@ class GameState:
                 now_match = re.search(r"now_at:(\d+),(\d+)", result)
                 if now_match:
                     vis_x, vis_y = int(now_match.group(1)), int(now_match.group(2))
-                    vis_lines = await self.conn.execute_read(
+                    vis_lines = await self.conn.execute_write(
                         lq.build_post_move_visibility_query(vis_x, vis_y)
                     )
                     vis_tiles = lq.parse_post_move_visibility(vis_lines)
@@ -363,14 +394,13 @@ class GameState:
                     for l in followup
                     if l.startswith("UNIT|") and f"owner:{local_id}" not in l
                 ]
-                eliminated = not enemy_units
+                missing_target = not enemy_units
 
                 # Build damage report from estimate (authoritative) or followup
                 post_hp = _extract_post_hp(followup, local_id)
                 damage_info = ""
-                if eliminated and pre_hp is not None:
-                    damage_info = f"|damage dealt:{pre_hp} (killed)"
-                    followup_str = "Target eliminated"
+                if missing_target:
+                    followup_str = "No observed target at destination; outcome unconfirmed"
                 elif pre_hp is not None and post_hp is not None and post_hp < pre_hp:
                     # Followup reflects real change (can happen for city attacks)
                     damage_info = f"|damage dealt:{pre_hp - post_hp}"
@@ -416,9 +446,7 @@ class GameState:
                 if pre_hp is not None and post_hp is not None and post_hp < pre_hp:
                     damage_info = f"|damage dealt:{pre_hp - post_hp}"
                 elif not any(l.startswith("UNIT|") for l in followup):
-                    if pre_hp is not None:
-                        damage_info = f"|damage dealt:{pre_hp} (killed)"
-                    followup_str = "Target eliminated"
+                    followup_str = "No observed target at destination; outcome unconfirmed"
 
                 result += damage_info + "\n  Post-combat: " + followup_str
             except Exception as e:
@@ -483,7 +511,9 @@ class GameState:
 
     async def get_settle_advisor(self, unit_index: int) -> str:
         lua = lq.build_settle_advisor_query(unit_index)
-        lines = await self.conn.execute_read(lua)
+        lines = await self.conn.execute_write(lua)
+        if any(line.startswith("ERR:") for line in lines):
+            return _action_result(lines)
         candidates = lq.parse_settle_advisor_response(lines)
         if candidates:
             return narrate_settle_candidates(candidates)
@@ -491,15 +521,17 @@ class GameState:
         try:
             global_candidates = await self.get_global_settle_scan()
             if global_candidates:
-                header = "No valid settle locations within 5 tiles. Best sites on revealed map:\n"
+                header = "No scored sites within 5 tiles. Best currently visible sites:\n"
                 return header + narrate_settle_candidates(global_candidates[:5])
         except Exception:
             log.debug("Global settle fallback failed", exc_info=True)
-        return "No valid settle locations found within 5 tiles or on revealed map."
+        return "No currently visible settlement candidates found."
 
     async def get_global_settle_scan(self) -> list[lq.SettleCandidate]:
         lua = lq.build_global_settle_scan()
-        lines = await self.conn.execute_read(lua)
+        lines = await self.conn.execute_write(lua)
+        if any(line.startswith("ERR:") for line in lines):
+            raise ValueError(_action_result(lines))
         return lq.parse_settle_advisor_response(lines)
 
     async def fortify_unit(self, unit_index: int) -> str:
@@ -623,7 +655,7 @@ class GameState:
                             )
                             if isinstance(placements, list) and placements:
                                 alts = ", ".join(
-                                    f"({p.x},{p.y}) Adj +{p.total_adjacency}"
+                                    f"({p.x},{p.y}) Adj " + (f"+{p.total_adjacency}" if p.adjacency_known else "unknown")
                                     for p in placements[:5]
                                 )
                                 hint += f" Valid tiles: {alts}."
@@ -1429,7 +1461,7 @@ class GameState:
             ov_lines = await self.conn.execute_write(lq.build_overview_query())
             overview = lq.parse_overview_response(ov_lines)
 
-        unit_lines = await self.conn.execute_read(lq.build_units_query())
+        unit_lines = await self.conn.execute_write(lq.build_units_query())
         units = lq.parse_units_response(unit_lines)
 
         city_lines = await self.conn.execute_write(lq.build_cities_query())
@@ -1705,6 +1737,8 @@ class GameState:
         """Record a successful save load for scumming detection."""
         import time
 
+        self._map_memory = {}
+        self._map_context = None
         ts = time.time()
         turn = self._high_water_turn
         self._save_load_history.append((ts, turn, save_name))
@@ -1713,10 +1747,8 @@ class GameState:
             self._save_load_history = self._save_load_history[-50:]
 
     async def execute_lua(self, code: str, context: str = "gamecore") -> str:
-        """Escape hatch: run arbitrary Lua code."""
-        from civ_mcp.game_lifecycle import execute_lua
-
-        return await execute_lua(self.conn, code, context)
+        """Arbitrary code execution is not part of the gameplay API."""
+        raise ValueError("Arbitrary Lua is disabled in the player-view server")
 
 
 def _action_result(lines: list[str]) -> str:

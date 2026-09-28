@@ -326,6 +326,7 @@ class TileInfo:
         -1
     )  # -1=none, 0=ancient, 1=medieval, 2=industrial, 3=modern, 4=railroad
     movement_cost: int = 1  # base movement cost for land units
+    observed_turn: int | None = None
 
 
 @dataclass
@@ -999,6 +1000,7 @@ class DistrictPlacement:
     adjacency: dict[str, int]  # yield_type -> bonus (e.g. {"science": 3})
     total_adjacency: int
     terrain_desc: str  # e.g. "Plains Hills"
+    adjacency_known: bool = True
 
 
 @dataclass

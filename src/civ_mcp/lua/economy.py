@@ -202,6 +202,7 @@ if origCity then
     end
 end
 local function enrichDest(i, city, cx, cy, isDom)
+    if not isDom and not PlayersVisibility[me]:IsVisible(cx, cy) then return end
     local civ = "Domestic"
     if not isDom then
         pcall(function() civ = Locale.Lookup(PlayerConfigurations[i]:GetCivilizationShortDescription()) end)
@@ -246,7 +247,7 @@ local function enrichDest(i, city, cx, cy, isDom)
 end
 local found = 0
 for i = 0, 62 do
-    if Players[i]:IsAlive() and i ~= 63 then
+    if Players[i] and Players[i]:IsAlive() and (i == me or Players[me]:GetDiplomacy():HasMet(i)) then
         for _, city in Players[i]:GetCities():Members() do
             local cx, cy = city:GetX(), city:GetY()
             local tParams = {{}}
@@ -272,7 +273,7 @@ if found == 0 then
         print("WARN:CANNOT_START|CanStartOperation blocked all destinations.")
     end
     for i = 0, 62 do
-        if Players[i]:IsAlive() and i ~= 63 then
+        if Players[i] and Players[i]:IsAlive() and (i == me or Players[me]:GetDiplomacy():HasMet(i)) then
             local atWar = false
             if i ~= me then
                 pcall(function()

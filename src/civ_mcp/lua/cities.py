@@ -5,6 +5,8 @@ from __future__ import annotations
 from civ_mcp.lua._helpers import (
     _ITEM_PARAM_MAP,
     _ITEM_TABLE_MAP,
+    _LUA_RES_VISIBLE,
+    _LUA_UNIT_VISIBLE,
     SENTINEL,
     _bail,
     _bail_lua,
@@ -14,7 +16,7 @@ from civ_mcp.lua.models import CityInfo, ProductionOption
 
 
 def build_cities_query() -> str:
-    return """
+    return _LUA_RES_VISIBLE + "\n" + _LUA_UNIT_VISIBLE + "\n" + """
 local me = Game.GetLocalPlayer()
 local hashName = {}
 for u in GameInfo.Units() do hashName[u.Hash] = u.UnitType end
@@ -30,9 +32,7 @@ for i, c in Players[me]:GetCities():Members() do
     if bq:GetSize() > 0 then
         local h = bq:GetCurrentProductionTypeHash()
         if h == 0 then
-            -- Ghost entry (Babylon eureka can obsolete queued items).
-            -- Try to clear it so the city reports as idle.
-            pcall(function() bq:RemoveAt(0) end)
+            -- Report a ghost entry without mutating the queue in a read query.
             producing = "nothing"
         else
             producing = hashName[h] or "UNKNOWN"
@@ -64,10 +64,10 @@ for i, c in Players[me]:GetCities():Members() do
         for dy = -3, 3 do for dx = -3, 3 do
             local tx, ty = cx + dx, cy + dy
             local d = Map.GetPlotDistance(cx, cy, tx, ty)
-            if d >= 1 and d <= 3 then
+            if d >= 1 and d <= 3 and PlayersVisibility[me]:IsVisible(tx, ty) then
                 local pu = Map.GetUnitsAt(tx, ty)
                 if pu then for other in pu:Units() do
-                    if other:GetOwner() ~= me then
+                    if other:GetOwner() ~= me and unitVisible(other) then
                         local eInfo = GameInfo.Units[other:GetType()]
                         local eName = eInfo and eInfo.UnitType or "UNKNOWN"
                         local eHP = other:GetMaxDamage() - other:GetDamage()
@@ -107,7 +107,7 @@ for i, c in Players[me]:GetCities():Members() do
         local px, py = cx2 + dx, cy2 + dy
         local plot = Map.GetPlot(px, py)
         if plot and plot:GetOwner() == me then
-            local res = plot:GetResourceType()
+            local res = visibleResourceType(plot)
             local imp = plot:GetImprovementType()
             if res >= 0 and imp < 0 then
                 local resInfo = GameInfo.Resources[res]
@@ -172,11 +172,15 @@ def build_city_attack(city_id: int, target_x: int, target_y: int) -> str:
     """InGame context: fire city ranged attack at a target tile."""
     return f"""
 {_lua_get_city(city_id)}
+{_LUA_UNIT_VISIBLE}
+if not PlayersVisibility[me]:IsVisible({target_x}, {target_y}) then
+    {_bail("ERR:TARGET_NOT_VISIBLE")}
+end
 local cx, cy = pCity:GetX(), pCity:GetY()
 local dist = Map.GetPlotDistance(cx, cy, {target_x}, {target_y})
 local enemy = nil
 local pu = Map.GetUnitsAt({target_x}, {target_y})
-if pu then for other in pu:Units() do if other:GetOwner() ~= me then enemy = other end end end
+if pu then for other in pu:Units() do if other:GetOwner() ~= me and unitVisible(other) then enemy = other end end end
 if not enemy then {_bail("ERR:NO_ENEMY|No hostile unit at target tile")} end
 local eInfo = GameInfo.Units[enemy:GetType()]
 local eName = eInfo and eInfo.UnitType or "UNKNOWN"
@@ -348,9 +352,10 @@ end
 print("DISTRICTS:")
 for dist in GameInfo.Districts() do
     if bq:CanProduce(dist.Hash, true) then
-        local t = bq:GetTurnsLeft(dist.Hash)
-        local adjCost = dist.Cost
-        pcall(function() local c = bq:GetProductionCost(dist.Hash); if c > 0 then adjCost = math.floor(c) end end)
+        local t = -1
+        pcall(function() t = bq:GetTurnsLeft(dist.Hash) end)
+        local adjCost = -1
+        pcall(function() local c = bq:GetDistrictCost(dist.Index); if type(c) == "number" and c >= 0 then adjCost = math.floor(c) end end)
         print("DISTRICT|" .. dist.DistrictType .. "|" .. adjCost .. "|" .. t .. "|-1")
     end
 end
@@ -377,7 +382,7 @@ for _, d in pCity:GetDistricts():Members() do
             local canRepair = CityManager.CanStartOperation(pCity, CityOperationTypes.BUILD, repParams, true)
             if canRepair then
                 local t = bq:GetTurnsLeft(dInfo.Hash)
-                local adjCost = dInfo.Cost
+                local adjCost = -1
                 pcall(function() local c = bq:GetProductionCost(dInfo.Hash); if c > 0 then adjCost = math.floor(c) end end)
                 print("DISTRICT|" .. dInfo.DistrictType .. "|" .. adjCost .. "|" .. t .. "|-1|REPAIR|" .. d:GetX() .. "," .. d:GetY())
             end

@@ -470,7 +470,9 @@ def narrate_city_production(options: list[lq.ProductionOption]) -> str:
         coords = ""
         if o.is_repair and o.repair_x is not None:
             coords = f" at ({o.repair_x},{o.repair_y})"
-        return f"  {o.item_name}{tag}{coords} (cost {o.cost}{t}{buy})"
+        cost = str(o.cost) if o.cost >= 0 else "unknown"
+        source = ", engine estimate; discount unverified" if o.category == "DISTRICT" and not o.is_repair else ""
+        return f"  {o.item_name}{tag}{coords} (cost {cost}{t}{buy}{source})"
 
     lines = []
     if units:
@@ -501,6 +503,9 @@ def narrate_map(tiles: list[lq.TileInfo]) -> str:
         return "No tiles."
     lines = [f"{len(tiles)} tiles:"]
     for t in tiles:
+        if t.terrain == "UNKNOWN":
+            lines.append(f"  ({t.x},{t.y}): [fog; no retained observation]")
+            continue
         parts = [t.terrain.replace("TERRAIN_", "")]
         if t.is_hills:
             parts.append("Hills")
@@ -553,7 +558,7 @@ def narrate_map(tiles: list[lq.TileInfo]) -> str:
             owner = f" (owned by player {t.owner_id})"
         vis_tag = ""
         if t.visibility == "revealed":
-            vis_tag = " [fog]"
+            vis_tag = f" [fog; last observed turn {t.observed_turn}]"
         unit_str = ""
         if t.units:
             unit_str = f" **[{', '.join(t.units)}]**"
@@ -600,7 +605,7 @@ def narrate_strategic_map(data: lq.StrategicMapData) -> str:
     ]
     if luxuries or strategics:
         lines.append("")
-        lines.append("UNCLAIMED RESOURCES (revealed, unowned):")
+        lines.append("UNCLAIMED RESOURCES (currently visible, unowned):")
         for r in luxuries:
             name = r.resource_type.replace("RESOURCE_", "")
             lines.append(f"  {name}+ at ({r.x},{r.y}) — luxury")
@@ -616,14 +621,14 @@ def narrate_strategic_map(data: lq.StrategicMapData) -> str:
 def narrate_settle_candidates(candidates: list[lq.SettleCandidate]) -> str:
     if not candidates:
         return "No valid settle locations found within 5 tiles."
-    lines = [f"Top {len(candidates)} settle locations:"]
+    lines = [f"Top {len(candidates)} visible settlement candidates (scores use visible tiles only):"]
     _WATER = {"fresh": "fresh water", "coast": "coast", "none": "no water"}
     for i, c in enumerate(candidates, 1):
         water = _WATER.get(c.water_type, c.water_type)
         loy_warn = ""
         if c.loyalty_pressure < -1:
             loy_warn = (
-                f" | !! Loyalty: ~{c.loyalty_pressure:+.0f}/turn (enemy pressure)"
+                f" | !! Settlement-lens loyalty warning: {c.loyalty_pressure:+.0f}/turn"
             )
         header = f"  #{i} ({c.x},{c.y}): Score {c.score:.0f} — F:{c.total_food} P:{c.total_prod} — {water}, defense:{c.defense_score}{loy_warn}"
         lines.append(header)
@@ -739,7 +744,7 @@ def narrate_diplomacy(civs: list[lq.CivInfo]) -> str:
                 hidden = c.num_cities - len(c.visible_cities)
                 fog_str = f" + {hidden} in fog" if hidden > 0 else ""
                 lines.append(
-                    f"    Cities ({c.num_cities}): {'; '.join(city_parts)}{fog_str}"
+                    f"    Currently visible cities ({c.num_cities}): {'; '.join(city_parts)}{fog_str}"
                 )
             else:
                 lines.append(f"    Cities: {c.num_cities} (all in fog)")
@@ -1303,6 +1308,9 @@ def narrate_district_advisor(
         return f"No valid placement tiles for {district_type}."
     lines = [f"{district_type} placement options ({len(placements)} tiles):"]
     for i, p in enumerate(placements, 1):
+        if not p.adjacency_known:
+            lines.append(f"  ({p.x},{p.y}) Adj: unknown (preview unavailable) — {p.terrain_desc}")
+            continue
         adj_parts = [f"{v} {k}" for k, v in p.adjacency.items()]
         adj_str = ", ".join(adj_parts) if adj_parts else "no adjacency"
         lines.append(

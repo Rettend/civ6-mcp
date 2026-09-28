@@ -49,9 +49,9 @@ for i = 0, 62 do
             if okMil and okMyMil then print("MILITARY|" .. i .. "|" .. (milStr or 0) .. "|" .. (myMilStr or 0)) end
             local nCivCities = 0
             for _, ec in Players[i]:GetCities():Members() do
-                nCivCities = nCivCities + 1
                 local ecx, ecy = ec:GetX(), ec:GetY()
-                if pVis:IsRevealed(ecx, ecy) then
+                if pVis:IsVisible(ecx, ecy) then
+                    nCivCities = nCivCities + 1
                     local ecName = Locale.Lookup(ec:GetName())
                     local ecPop = ec:GetPopulation()
                     local ecLoy, ecLoyPT = 100, 0
@@ -556,11 +556,13 @@ for _, city in Players[me]:GetCities():Members() do
     print("CITY|OURS|" .. cid .. "|" .. cName .. "|" .. pop .. "|" .. isCapital)
 end
 for _, city in Players[target]:GetCities():Members() do
+    if PlayersVisibility[me]:IsVisible(city:GetX(), city:GetY()) then
     local cName = Locale.Lookup(city:GetName()):gsub("|", "/")
     local cid = city:GetID()
     local pop = city:GetPopulation()
     local isCapital = city:IsCapital() and "1" or "0"
     print("CITY|THEIRS|" .. cid .. "|" .. cName .. "|" .. pop .. "|" .. isCapital)
+    end
 end
 print("{SENTINEL}")
 """

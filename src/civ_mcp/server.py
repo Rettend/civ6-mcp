@@ -43,6 +43,7 @@ from civ_mcp.telemetry import (
     TelemetryEmitter,
 )
 from civ_mcp.web_api import create_app
+from civ_mcp.player_server import PlayerViewMCP
 
 log = logging.getLogger(__name__)
 
@@ -357,7 +358,7 @@ async def lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         await conn.disconnect()
 
 
-mcp = FastMCP(
+mcp = PlayerViewMCP(
     "Civilization VI",
     instructions="Read game state and issue commands to a running Civ 6 game. Call get_game_overview first to orient yourself.",
     lifespan=lifespan,
@@ -737,13 +738,34 @@ async def get_map_area(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+async def get_settlement_lens(ctx: Context, center_x: int, center_y: int, radius: int = 4) -> str:
+    """Read settlement-lens colors and loyalty warnings on explored tiles.
+
+    Blocked means the UI's red no-settle zone, not proof of a hidden city.
+    A missing API returns unavailable rather than reconstructing hidden cities.
+    """
+    from civ_mcp.lua.map import build_settlement_lens_query
+
+    async def _run():
+        lines = await _get_game(ctx).conn.execute_write(
+            build_settlement_lens_query(center_x, center_y, max(0, min(radius, 8)))
+        )
+        return "Settlement lens: x,y | fresh/coast/none/blocked | loyalty warning\n" + "\n".join(
+            line for line in lines if line.startswith(("LENS|", "ERR:"))
+        )
+
+    return await _logged(ctx, "get_settlement_lens", {"center_x": center_x, "center_y": center_y, "radius": radius}, _run)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_settle_advisor(ctx: Context, unit_id: int) -> str:
     """List best settle locations near a settler unit.
 
     Args:
         unit_id: The settler's composite ID (from get_units output)
 
-    Scores locations by yields, water, defense, and resource value.
+    Scores currently visible locations using observed yields, terrain and resources,
+    and the native settlement lens. Scores can be incomplete near fog.
     Returns top 5 candidates sorted by score.
     """
     gs = _get_game(ctx)
@@ -786,7 +808,7 @@ async def get_pathing_estimate(
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_global_settle_advisor(ctx: Context) -> str:
-    """Find the best settle locations across the entire revealed map.
+    """Find settlement candidates across the currently visible map.
 
     Unlike get_settle_advisor (which searches near a specific settler),
     this scans all revealed land for the top 10 settle candidates.
@@ -1705,13 +1727,31 @@ async def set_city_production(
     if target_x is not None:
         params["target_x"] = target_x
         params["target_y"] = target_y
+
+    async def _run():
+        async def cost_observation():
+            try:
+                data = await gs.get_district_costs(city_id)
+                row = next((row for row in data.pop("districts") if row["type"] == item_name), None)
+                return {**data, "district": row}
+            except (ConnectionError, LuaError, ValueError) as exc:
+                return {"discount_status": "unverified", "error": str(exc)}
+
+        before = await cost_observation() if item_type.upper() == "DISTRICT" else None
+        result = await gs.set_city_production(city_id, item_type, item_name, target_x, target_y)
+        if before is not None:
+            after = await cost_observation()
+            result += "\nDistrict cost observations (discount unverified):\n" + json.dumps(
+                {"city_id": city_id, "type": item_name, "x": target_x, "y": target_y,
+                 "before": before, "after": after}, indent=2
+            )
+        return result
+
     return await _logged(
         ctx,
         "set_city_production",
         params,
-        lambda: gs.set_city_production(
-            city_id, item_type, item_name, target_x, target_y
-        ),
+        _run,
     )
 
 
@@ -2112,15 +2152,7 @@ async def end_turn(
             _get_logger(ctx).set_turn(new_turn)
             _get_spatial(ctx).set_turn(new_turn)
             heartbeat.write("playing", turn=new_turn)
-        # Map capture — record terrain (first turn) + ownership delta
-        if _diary_civ_type and _diary_seed:
-            try:
-                mc = _get_map_capture(ctx)
-                mc.bind_game(_diary_civ_type, _diary_seed)
-                capture_turn = new_turn if m else _diary_turn
-                await mc.capture(gs.conn, capture_turn)
-            except Exception:
-                log.debug("Map capture failed", exc_info=True)
+        # Omniscient replay capture is deliberately excluded from gameplay.
     elif "Turn paused" in result or "World Congress fires" in result:
         gs._end_turn_blocked = True
         # Safety net: if WC blocker fires repeatedly on the same turn,
@@ -2317,6 +2349,19 @@ async def get_trade_destinations(ctx: Context, unit_id: int) -> str:
 # ---------------------------------------------------------------------------
 # District advisor
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+async def get_district_costs(ctx: Context, city_id: int) -> str:
+    """Read district counts, predicted discount eligibility and both engine cost quotes.
+
+    Does not force a refresh or claim that a quote proves a discount. For a placed
+    district the quote refers to that city's district, not a fresh placement.
+    """
+    async def _run():
+        return json.dumps(await _get_game(ctx).get_district_costs(city_id), indent=2)
+
+    return await _logged(ctx, "get_district_costs", {"city_id": city_id}, _run)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -2619,18 +2664,16 @@ async def queue_wc_votes(ctx: Context, votes: str) -> str:
 
 @mcp.tool(annotations={"readOnlyHint": True})
 async def get_victory_progress(ctx: Context) -> str:
-    """Get victory condition progress for all civilizations.
+    """Get the local player's victory condition progress.
 
-    Shows progress toward Science, Domination, Culture, Religious,
-    Diplomatic, and Score victories. Includes space race VP, diplomatic VP,
-    tourism vs domestic tourists, religion spread, capital ownership,
-    and military strength. Call every 20-30 turns to track the race.
+    Includes local space projects, victory points, tourism, religion and capital
+    ownership. Rival victory details and comparative demographics are unavailable.
     """
     gs = _get_game(ctx)
 
     async def _run():
         vp = await gs.get_victory_progress()
-        return nr.narrate_victory_progress(vp)
+        return nr.narrate_victory_progress(vp) + "\nRival victory details and comparative demographics are unavailable in player-view mode."
 
     return await _logged(ctx, "get_victory_progress", {}, _run)
 
@@ -2698,27 +2741,9 @@ async def dismiss_popup(ctx: Context) -> str:
     return await _logged(ctx, "dismiss_popup", {}, gs.dismiss_popup)
 
 
-@mcp.tool(annotations={"destructiveHint": True})
 async def run_lua(ctx: Context, code: str, context: str = "gamecore") -> str:
-    """Run arbitrary Lua code in the game. Advanced escape hatch — prefer built-in tools.
-
-    Args:
-        code: Lua code to execute. Use print() for output, end with print("---END---").
-        context: "gamecore" (default) for read-only state queries.
-                 "ingame" for commands and UI-dependent queries.
-
-    Context differences:
-      gamecore: Players[], GameInfo.*, Map.*, Game.* — safe read-only access.
-                CANNOT use: UI.*, UnitManager.*, CityManager.*, notifications.
-      ingame:   All APIs including UI.*, UnitManager.*, CityManager.*.
-                Use for: moving units, setting research, diplomacy actions.
-
-    Always use print() for output (not return).
-    """
-    gs = _get_game(ctx)
-    return await _logged(
-        ctx, "run_lua", {"context": context}, lambda: gs.execute_lua(code, context)
-    )
+    """Retired debug entry point; deliberately not registered as an MCP tool."""
+    raise ValueError("Arbitrary Lua is disabled in the player-view server")
 
 
 # ---------------------------------------------------------------------------
@@ -2916,8 +2941,5 @@ def main():
         signal.signal(
             signal.SIGTERM, lambda sig, frame: os.kill(os.getpid(), signal.SIGINT)
         )
-
-    if os.environ.get("CIV_MCP_DISABLE_LUA"):
-        mcp._tool_manager.remove_tool("run_lua")
 
     mcp.run(transport="stdio")

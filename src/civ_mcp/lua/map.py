@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from civ_mcp.lua._helpers import (
     _LUA_RES_VISIBLE,
+    _LUA_UNIT_VISIBLE,
     SENTINEL,
     _bail,
     _bail_lua,
@@ -32,17 +33,19 @@ from civ_mcp.lua.models import (
 
 _SETTLE_PREAMBLE = (
     """
-local allCities = {}
-for i = 0, 62 do
-    if Players[i] and Players[i]:IsAlive() then
-        local cities = Players[i]:GetCities()
-        if cities then
-            for _, c in cities:Members() do
-                table.insert(allCities, {x=c:GetX(), y=c:GetY()})
-            end
-        end
-    end
+local lens = {}
+local lensOK, fresh, coast, dry, blocked = pcall(Map.GetContinentPlotsWaterAvailability)
+if not lensOK then
+    print("ERR:LENS_UNAVAILABLE|Settlement lens unavailable")
+    print("---END---")
+    return
 end
+for _, idx in ipairs(fresh or {}) do lens[idx] = "fresh" end
+for _, idx in ipairs(coast or {}) do lens[idx] = "coast" end
+for _, idx in ipairs(dry or {}) do lens[idx] = "none" end
+for _, idx in ipairs(blocked or {}) do lens[idx] = "blocked" end
+local loyaltyOK, loyalty = pcall(Map.GetContinentPlotsLoyalty)
+if not loyaltyOK or type(loyalty) ~= "table" then loyalty = {} end
 local classPrefix = {RESOURCECLASS_STRATEGIC="S", RESOURCECLASS_LUXURY="L", RESOURCECLASS_BONUS="B"}
 """
     + _LUA_RES_VISIBLE
@@ -51,14 +54,11 @@ local candidates = {}
 """
 )
 
-# Scoring body — expects cx, cy, cPlot, vis, me, allCities, classPrefix, resVisible in scope.
+# Scoring body — uses the local player's settlement lens, not foreign city scans.
 # Appends to `candidates` table.
 _SETTLE_SCORE_BODY = """
-                local tooClose = false
-                for _, city in ipairs(allCities) do
-                    if Map.GetPlotDistance(cx, cy, city.x, city.y) <= 3 then tooClose = true; break end
-                end
-                if not tooClose then
+                local waterType = lens[cPlot:GetIndex()]
+                if waterType and waterType ~= "blocked" then
                     local totalF, totalP, totalG = 0, 0, 0
                     local resList = {}
                     local luxCount, stratCount = 0, 0
@@ -66,7 +66,7 @@ _SETTLE_SCORE_BODY = """
                         for rx = -3, 3 do
                             local tx, ty = cx + rx, cy + ry
                             local tPlot = Map.GetPlot(tx, ty)
-                            if tPlot and Map.GetPlotDistance(cx, cy, tx, ty) <= 3 and vis:IsRevealed(tPlot:GetIndex()) then
+                            if tPlot and Map.GetPlotDistance(cx, cy, tx, ty) <= 3 and vis:IsVisible(tx, ty) then
                                 totalF = totalF + tPlot:GetYield(0)
                                 totalP = totalP + tPlot:GetYield(1)
                                 totalG = totalG + tPlot:GetYield(2)
@@ -84,9 +84,6 @@ _SETTLE_SCORE_BODY = """
                             end
                         end
                     end
-                    local waterType = "none"
-                    if cPlot:IsFreshWater() then waterType = "fresh"
-                    elseif cPlot:IsCoastalLand() then waterType = "coast" end
                     local defScore = 0
                     if cPlot:IsHills() then defScore = defScore + 2 end
                     if cPlot:IsRiver() then defScore = defScore + 1 end
@@ -94,38 +91,14 @@ _SETTLE_SCORE_BODY = """
                         for adx = -1, 1 do
                             if adx ~= 0 or ady ~= 0 then
                                 local ap = Map.GetPlot(cx + adx, cy + ady)
-                                if ap and ap:IsHills() and Map.GetPlotDistance(cx, cy, cx+adx, cy+ady) == 1 then defScore = defScore + 1 end
+                                if ap and vis:IsVisible(ap:GetX(), ap:GetY()) and ap:IsHills() and Map.GetPlotDistance(cx, cy, cx+adx, cy+ady) == 1 then defScore = defScore + 1 end
                             end
                         end
                     end
                     local score = totalF * 2 + totalP * 2 + totalG + luxCount * 4 + stratCount * 3 + defScore
                     if waterType == "fresh" then score = score + 5
                     elseif waterType == "coast" then score = score + 3 end
-                    local friendlyP, enemyP = 1.0, 0
-                    for pi = 0, 62 do
-                        local pp = Players[pi]
-                        if pp ~= nil and pp:IsAlive() and pp:IsMajor() then
-                            local pcc = pp:GetCities()
-                            if pcc then
-                                local capC = pcc:GetCapitalCity()
-                                local capI = capC and capC:GetID() or -1
-                                for _, pc in pcc:Members() do
-                                    local pd = Map.GetPlotDistance(cx, cy, pc:GetX(), pc:GetY())
-                                    if pd > 0 and pd <= 9 then
-                                        local raw = pc:GetPopulation() * (10 - pd) / 10
-                                        if pc:GetID() == capI then raw = raw * 1.5 end
-                                        if pi == me then friendlyP = friendlyP + raw
-                                        else enemyP = enemyP + raw end
-                                    end
-                                end
-                            end
-                        end
-                    end
-                    local loyP = friendlyP - enemyP
-                    local minPr = math.min(friendlyP, enemyP)
-                    local loyPT = 10 * loyP / (minPr + 0.5)
-                    if loyPT < -20 then loyPT = -20 end
-                    if loyPT > 20 then loyPT = 20 end
+                    local loyPT = tonumber(loyalty[cPlot:GetIndex()]) or 0
                     if loyPT < 0 then score = score + loyPT * 2 end
                     table.insert(candidates, {x=cx, y=cy, score=score, f=totalF, p=totalP, water=waterType, def=defScore, res=table.concat(resList, ","), loy=loyPT})
                 end
@@ -151,6 +124,8 @@ local me = Game.GetLocalPlayer()
 local vis = PlayersVisibility[me]
 local pTech = Players[me]:GetTechs()
 {_LUA_RES_VISIBLE}
+{_LUA_UNIT_VISIBLE}
+print("VIEW|" .. me .. "|" .. Game.GetCurrentGameTurn() .. "|" .. tostring(GameConfiguration.GetValue("GAME_SYNC_RANDOM_SEED")))
 for dy = -r, r do
     for dx = -r, r do
         local x, y = cx + dx, cy + dy
@@ -159,7 +134,9 @@ for dy = -r, r do
             local plotIdx = plot:GetIndex()
             local revealed = vis:IsRevealed(plotIdx)
             local visible = vis:IsVisible(plotIdx)
-            if revealed then
+            if revealed and not visible then
+                print("FOG|" .. x .. "," .. y)
+            elseif visible then
                 local terrain = GameInfo.Terrains[plot:GetTerrainType()].TerrainType
                 local hills = plot:IsHills() and "1" or "0"
                 local river = plot:IsRiver() and "1" or "0"
@@ -207,7 +184,7 @@ for dy = -r, r do
                             local units = Players[i]:GetUnits()
                             if units then
                                 for _, u in units:Members() do
-                                    if u:GetX() == x and u:GetY() == y then
+                                    if u:GetX() == x and u:GetY() == y and unitVisible(u) then
                                         local entry = GameInfo.Units[u:GetType()]
                                         local ut = entry and entry.UnitType or "UNKNOWN"
                                         local label = ""
@@ -268,7 +245,7 @@ print("{SENTINEL}")
 
 def build_strategic_map_query() -> str:
     """GameCore context: fog boundary per city + unclaimed luxury/strategic resources."""
-    return """
+    return _LUA_RES_VISIBLE + "\n" + """
 local me = Game.GetLocalPlayer()
 local vis = PlayersVisibility[me]
 local pTech = Players[me]:GetTechs()
@@ -309,8 +286,8 @@ end
 for y = 0, h - 1 do
     for x = 0, w - 1 do
         local plot = Map.GetPlot(x, y)
-        if plot and vis:IsRevealed(plot:GetIndex()) and plot:GetOwner() == -1 then
-            local resIdx = plot:GetResourceType()
+        if plot and vis:IsVisible(x, y) and plot:GetOwner() == -1 then
+            local resIdx = visibleResourceType(plot)
             if resIdx >= 0 then
                 local res = GameInfo.Resources[resIdx]
                 if res and res.ResourceClassType ~= "RESOURCECLASS_BONUS" then
@@ -386,7 +363,7 @@ for i = 0, 62 do
             for _, c in cities:Members() do
                 local dist = Map.GetPlotDistance(x, y, c:GetX(), c:GetY())
                 if dist <= 3 then
-                    {_bail_lua('"ERR:CANNOT_FOUND|Too close to " .. Locale.Lookup(c:GetName()) .. " (settler at " .. x .. "," .. y .. ", distance " .. dist .. ", need > 3)"')}
+                    {_bail("ERR:CANNOT_FOUND|Settlement spacing requirement not met")}
                 end
             end
         end
@@ -452,7 +429,7 @@ end
 
 
 def build_global_settle_scan() -> str:
-    """GameCore context: scan all revealed, unowned tiles for settle viability.
+    """InGame context: score visible tiles allowed by the settlement lens.
 
     Reuses the same scoring logic and SETTLE| output format as
     build_settle_advisor_query, but searches the entire revealed map
@@ -468,12 +445,32 @@ for y = 0, h - 1 do
     for x = 0, w - 1 do
         local cx, cy = x, y
         local cPlot = Map.GetPlot(cx, cy)
-        if cPlot and vis:IsRevealed(cPlot:GetIndex()) and not cPlot:IsWater() and not cPlot:IsMountain() then
+        if cPlot and vis:IsVisible(cx, cy) and not cPlot:IsWater() and not cPlot:IsMountain() then
 {_SETTLE_SCORE_BODY}
         end
     end
 end
 {_settle_output(10)}
+"""
+
+
+def build_settlement_lens_query(center_x: int, center_y: int, radius: int) -> str:
+    """Return the UI's settlement colors and loyalty warnings on explored tiles."""
+    return f"""
+local me = Game.GetLocalPlayer()
+local vis = PlayersVisibility[me]
+{_SETTLE_PREAMBLE}
+for y = {center_y} - {radius}, {center_y} + {radius} do
+    for x = {center_x} - {radius}, {center_x} + {radius} do
+        local plot = Map.GetPlot(x, y)
+        if plot and vis:IsRevealed(x, y) then
+            local idx = plot:GetIndex()
+            local warning = loyaltyOK and tostring(loyalty[idx] or "none") or "unknown"
+            print("LENS|" .. x .. "," .. y .. "|" .. (lens[idx] or "unknown") .. "|" .. warning)
+        end
+    end
+end
+print("{SENTINEL}")
 """
 
 
@@ -544,7 +541,7 @@ for _, city in ipairs(myCities) do
             local key = tx .. "," .. ty
             if not seen[key] then
                 local tPlot = Map.GetPlot(tx, ty)
-                if tPlot and vis:IsRevealed(tPlot:GetIndex()) and tPlot:GetOwner() ~= me then
+                if tPlot and vis:IsVisible(tx, ty) and tPlot:GetOwner() ~= me then
                     local rIdx = tPlot:GetResourceType()
                     if rIdx >= 0 and pRes:IsResourceVisible(rIdx) then
                         local resEntry = GameInfo.Resources[rIdx]
@@ -564,11 +561,7 @@ print("{SENTINEL}")
 
 
 def build_district_advisor_query(city_id: int, district_type: str) -> str:
-    """Find valid tiles for a district with adjacency bonuses (InGame context).
-
-    Uses hardcoded adjacency formulas for common districts rather than
-    parsing 157 Adjacency_YieldChanges rows in Lua.
-    """
+    """Use the game's player-facing placement and adjacency APIs (InGame)."""
     return f"""
 {_lua_get_city(city_id)}
 local pTech = Players[Game.GetLocalPlayer()]:GetTechs()
@@ -591,84 +584,18 @@ local results = {{}}
 local dType = "{district_type}"
 for _, pIdx in ipairs(plotIndices) do
     local plot = Map.GetPlotByIndex(pIdx)
-    if plot and not plot:IsWater() and not plot:IsImpassable() and not plot:IsMountain() then
+    if plot and PlayersVisibility[me]:IsVisible(plot:GetX(), plot:GetY()) then
         local px, py = plot:GetX(), plot:GetY()
-        local adj_s, adj_p, adj_g, adj_f, adj_c = 0, 0, 0, 0, 0
-        local mountains, jungles, forests, districts, rivers = 0, 0, 0, 0, 0
-        local wonders, mines, quarries, harbors, aqueducts, ent_complex = 0, 0, 0, 0, 0, 0
-        local geothermal, reefs, nat_wonders, sea_resources = 0, 0, 0, 0
-        local isRiver = plot:IsRiver()
-        if isRiver then rivers = 1 end
-        for d = 0, 5 do
-            local adj = Map.GetAdjacentPlot(px, py, d)
-            if adj then
-                if adj:IsMountain() then mountains = mountains + 1 end
-                local feat = adj:GetFeatureType()
-                if feat >= 0 then
-                    local fInfo = GameInfo.Features[feat]
-                    if fInfo then
-                        local fn = fInfo.FeatureType
-                        if fn == "FEATURE_JUNGLE" then jungles = jungles + 1
-                        elseif fn == "FEATURE_FOREST" then forests = forests + 1
-                        elseif fn == "FEATURE_GEOTHERMAL_FISSURE" then geothermal = geothermal + 1
-                        elseif fn == "FEATURE_REEF" then reefs = reefs + 1
-                        elseif fInfo.NaturalWonder then nat_wonders = nat_wonders + 1
-                        end
-                    end
-                end
-                local distId = adj:GetDistrictType()
-                if distId >= 0 then
-                    districts = districts + 1
-                    local dInfo = GameInfo.Districts[distId]
-                    if dInfo then
-                        local dn = dInfo.DistrictType
-                        if dn == "DISTRICT_HARBOR" then harbors = harbors + 1
-                        elseif dn == "DISTRICT_AQUEDUCT" then aqueducts = aqueducts + 1
-                        elseif dn == "DISTRICT_ENTERTAINMENT_COMPLEX" or dn == "DISTRICT_WATER_ENTERTAINMENT_COMPLEX" then ent_complex = ent_complex + 1
-                        end
-                    end
-                end
-                local imp = adj:GetImprovementType()
-                if imp >= 0 then
-                    local iInfo = GameInfo.Improvements[imp]
-                    if iInfo then
-                        local in2 = iInfo.ImprovementType
-                        if in2 == "IMPROVEMENT_MINE" then mines = mines + 1
-                        elseif in2 == "IMPROVEMENT_QUARRY" then quarries = quarries + 1
-                        end
-                    end
-                end
-                local res = adj:GetResourceType()
-                if res >= 0 then
-                    local rInfo = GameInfo.Resources[res]
-                    if rInfo and adj:IsWater() then
-                        local rTechOk = true
-                        if rInfo.PrereqTech then
-                            local rt = GameInfo.Technologies[rInfo.PrereqTech]
-                            if rt and not pTech:HasTech(rt.Index) then rTechOk = false end
-                        end
-                        if rTechOk then sea_resources = sea_resources + 1 end
-                    end
-                end
-                local wid = adj:GetWonderType()
-                if wid >= 0 then wonders = wonders + 1 end
-            end
+        local values, known, total = {{}}, true, 0
+        for _, name in ipairs({{"YIELD_SCIENCE", "YIELD_PRODUCTION", "YIELD_GOLD", "YIELD_FAITH", "YIELD_CULTURE"}}) do
+            local row = GameInfo.Yields[name]
+            local ok, value = pcall(function()
+                return plot:GetAdjacencyYield(me, pCity:GetID(), dist.Index, row.Index)
+            end)
+            if not ok or type(value) ~= "number" then known = false; value = 0 end
+            table.insert(values, value)
+            total = total + value
         end
-        if dType == "DISTRICT_CAMPUS" then
-            adj_s = mountains + math.floor(jungles / 2) + geothermal * 2 + reefs * 2 + nat_wonders * 2
-        elseif dType == "DISTRICT_HOLY_SITE" then
-            adj_f = mountains + math.floor(forests / 2) + nat_wonders * 2
-        elseif dType == "DISTRICT_INDUSTRIAL_ZONE" then
-            adj_p = mines + quarries + aqueducts * 2
-        elseif dType == "DISTRICT_COMMERCIAL_HUB" then
-            if rivers > 0 then adj_g = adj_g + 2 end
-            adj_g = adj_g + harbors * 2
-        elseif dType == "DISTRICT_THEATER" then
-            adj_c = wonders + ent_complex * 2
-        elseif dType == "DISTRICT_HARBOR" then
-            adj_g = sea_resources
-        end
-        local total = adj_s + adj_p + adj_g + adj_f + adj_c
         local terrain = ""
         local tInfo = GameInfo.Terrains[plot:GetTerrainType()]
         if tInfo then terrain = Locale.Lookup(tInfo.Name) end
@@ -676,13 +603,22 @@ for _, pIdx in ipairs(plotIndices) do
         local fInfo2 = nil
         if plot:GetFeatureType() >= 0 then fInfo2 = GameInfo.Features[plot:GetFeatureType()] end
         if fInfo2 then terrain = terrain .. " " .. Locale.Lookup(fInfo2.Name) end
-        table.insert(results, {{x=px, y=py, s=adj_s, p=adj_p, g=adj_g, f=adj_f, c=adj_c, total=total, terrain=terrain}})
+        table.insert(results, {{x=px, y=py, values=values, known=known, total=total, terrain=terrain}})
     end
 end
-table.sort(results, function(a, b) return a.total > b.total end)
+table.sort(results, function(a, b)
+    if a.known ~= b.known then return a.known end
+    if a.total ~= b.total then return a.total > b.total end
+    if a.y ~= b.y then return a.y < b.y end
+    return a.x < b.x
+end)
 for i = 1, math.min(#results, 10) do
     local r = results[i]
-    print("DPLOT|" .. r.x .. "," .. r.y .. "|" .. r.s .. "|" .. r.p .. "|" .. r.g .. "|" .. r.f .. "|" .. r.c .. "|" .. r.total .. "|" .. r.terrain)
+    if r.known then
+        print("DPLOT|" .. r.x .. "," .. r.y .. "|" .. table.concat(r.values, "|") .. "|" .. r.total .. "|" .. r.terrain)
+    else
+        print("DUNKNOWN|" .. r.x .. "," .. r.y .. "|" .. r.terrain)
+    end
 end
 print("{SENTINEL}")
 """
@@ -697,6 +633,7 @@ def build_wonder_advisor_query(city_id: int, wonder_name: str) -> str:
     """
     return f"""
 {_lua_get_city(city_id)}
+{_LUA_RES_VISIBLE}
 local brow = GameInfo.Buildings["{wonder_name}"]
 if brow == nil then {_bail(f"ERR:WONDER_NOT_FOUND|{wonder_name}")} end
 if not brow.IsWonder then {_bail(f"ERR:NOT_A_WONDER|{wonder_name} is not a wonder")} end
@@ -717,7 +654,7 @@ if #plotIndices == 0 then {_bail("ERR:NO_TILES|No valid placement tiles found")}
 local results = {{}}
 for _, pIdx in ipairs(plotIndices) do
   local plot = Map.GetPlotByIndex(pIdx)
-  if plot then
+  if plot and PlayersVisibility[me]:IsVisible(plot:GetX(), plot:GetY()) then
     local px, py = plot:GetX(), plot:GetY()
     local terrainName = "?"
     local tInfo = GameInfo.Terrains[plot:GetTerrainType()]
@@ -731,7 +668,7 @@ for _, pIdx in ipairs(plotIndices) do
     local isRiver = plot:IsRiver()
     local isCoastal = plot:IsCoastalLand()
     local resName = "none"
-    local res = plot:GetResourceType()
+    local res = visibleResourceType(plot)
     if res >= 0 then
       local rInfo = GameInfo.Resources[res]
       if rInfo then resName = rInfo.ResourceType end
@@ -767,6 +704,7 @@ def build_purchasable_tiles_query(city_id: int) -> str:
     return f"""
 {_lua_get_city(city_id)}
 local pTech = Players[me]:GetTechs()
+{_LUA_RES_VISIBLE}
 local targets = CityManager.GetCommandTargets(pCity, CityCommandTypes.PURCHASE, {{[CityCommandTypes.PARAM_PLOT_PURCHASE] = 1}})
 if targets == nil then {_bail("ERR:NO_TARGETS|No purchasable tiles found")} end
 local plotIndices = {{}}
@@ -779,7 +717,7 @@ if #plotIndices == 0 then {_bail("ERR:NO_TILES|No purchasable tiles")} end
 local results = {{}}
 for _, pIdx in ipairs(plotIndices) do
     local plot = Map.GetPlotByIndex(pIdx)
-    if plot then
+    if plot and PlayersVisibility[me]:IsVisible(plot:GetX(), plot:GetY()) then
         local px, py = plot:GetX(), plot:GetY()
         local cost = pCity:GetGold():GetPlotPurchaseCost(px, py)
         if cost > 0 then
@@ -788,16 +726,11 @@ for _, pIdx in ipairs(plotIndices) do
             if tInfo then terrain = Locale.Lookup(tInfo.Name) end
             if plot:IsHills() then terrain = terrain .. " Hills" end
             local resName, resClass = "", ""
-            local res = plot:GetResourceType()
+            local res = visibleResourceType(plot)
             if res >= 0 then
                 local rInfo = GameInfo.Resources[res]
                 if rInfo then
-                    local rTechOk = true
-                    if rInfo.PrereqTech then
-                        local rt = GameInfo.Technologies[rInfo.PrereqTech]
-                        if rt and not pTech:HasTech(rt.Index) then rTechOk = false end
-                    end
-                    if rTechOk then
+                    if resVisible(rInfo) then
                         resName = Locale.Lookup(rInfo.Name)
                         local rc = rInfo.ResourceClassType
                         if rc == "RESOURCECLASS_STRATEGIC" then resClass = "strategic"
@@ -1080,17 +1013,22 @@ def parse_district_advisor_response(lines: list[str]) -> list[DistrictPlacement]
     """Parse DPLOT| lines from build_district_advisor_query."""
     results: list[DistrictPlacement] = []
     for line in lines:
+        if line.startswith("DUNKNOWN|"):
+            _, coords, terrain = line.split("|", 2)
+            x, y = coords.split(",")
+            results.append(DistrictPlacement(_int(x), _int(y), {}, 0, terrain, adjacency_known=False))
+            continue
         if line.startswith("DPLOT|"):
             parts = line.split("|")
             if len(parts) >= 9:
                 coords = parts[1].split(",")
                 adjacency: dict[str, int] = {}
                 s, p, g, f, c = (
-                    int(parts[2]),
-                    int(parts[3]),
-                    int(parts[4]),
-                    int(parts[5]),
-                    int(parts[6]),
+                    _int(parts[2]),
+                    _int(parts[3]),
+                    _int(parts[4]),
+                    _int(parts[5]),
+                    _int(parts[6]),
                 )
                 if s:
                     adjacency["science"] = s
@@ -1107,7 +1045,7 @@ def parse_district_advisor_response(lines: list[str]) -> list[DistrictPlacement]
                         x=int(coords[0]),
                         y=int(coords[1]),
                         adjacency=adjacency,
-                        total_adjacency=int(parts[7]),
+                        total_adjacency=_int(parts[7]),
                         terrain_desc=parts[8],
                     )
                 )

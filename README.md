@@ -2,13 +2,15 @@
 
 An MCP server that lets LLM agents play full games of Civilization VI.
 
-Connect any MCP-compatible client — Claude Code, Codex, Gemini CLI, or your own — to a running Civ 6 game. The agent reads game state, moves units, manages cities, conducts diplomacy, and ends turns, all through the game's own rule-enforcing APIs. No cheats, no vision model required.
+Connect any MCP-compatible client — Claude Code, Codex, Gemini CLI, or your own — to a running Civ 6 game. The agent reads game state, moves units, manages cities, conducts diplomacy, and ends turns, all through the game's own rule-enforcing APIs. No vision model required.
+
+This fork of [Liam Wilkinson's civ6-mcp](https://github.com/lmwilki/civ6-mcp) fixes hidden-information leaks and district queries for competitive play, and adds an experimental multiplayer Tuner patch. The goal is LLM-vs-LLM games, with LLM-vs-human games in the future. See [multiplayer setup and tested support](docs/multiplayer.md).
 
 <!-- TODO: Add screenshot or GIF of agent playing -->
 
 ## Capabilities
 
-76 tools covering the full gameplay loop:
+Tools covering the full gameplay loop:
 
 - **Units** — list, move, attack, fortify, found cities, build improvements, promote, upgrade
 - **Cities** — inspect, set production, purchase units/buildings with gold, manage focus
@@ -21,7 +23,7 @@ Connect any MCP-compatible client — Claude Code, Codex, Gemini CLI, or your ow
 - **Religion** — found pantheons and religions, select beliefs, track spread
 - **Great People** — recruit, patronize, reject
 - **World Congress** — vote on resolutions, manage diplomatic favor
-- **Victory** — track progress across all victory conditions
+- **Victory** — track local progress; private rival telemetry is unavailable
 - **Game lifecycle** — save, load, launch, restart, kill
 
 Every turn, `end_turn` takes before/after snapshots and reports what happened: units damaged, cities grew, production completed, threats spotted near your cities.
@@ -55,12 +57,10 @@ Enable the FireTuner debug interface and configure recommended settings:
 <details>
 <summary><strong>Windows: additional setup</strong></summary>
 
-**Install the Civ 6 SDK** — the tuner server is part of the SDK, not the base game:
-1. In Steam, go to Library → filter by Tools
-2. Find and install "Sid Meier's Civilization VI SDK"
+The Tuner listener is built into Civ 6. MCP connects directly to it; installing the SDK is unnecessary.
 
 **Important notes:**
-- Close `FireTuner.exe` (the SDK's GUI tool) before running civ6-mcp — the game only allows **one** tuner connection at a time
+- Close `FireTuner.exe` (the SDK's GUI tool) if it is running — the game only allows **one** tuner connection at a time
 - Do **not** run from WSL — the network bridging between WSL2 and Windows is unreliable and the tuner server locks up after failed connections
 - If the connection fails, **restart the game** — the tuner often hangs after a bad handshake and won't recover until the process is recycled
 </details>
@@ -77,29 +77,35 @@ Restart Civ 6. The game will listen on TCP port 4318 for connections.
 
 ### 2. Install
 
+Install [Git](https://git-scm.com/) and [uv](https://docs.astral.sh/uv/getting-started/installation/), then run the following in PowerShell on Windows or your terminal. uv can install Python 3.12 for you.
+
 ```bash
-git clone https://github.com/lmwilki/civ6-mcp.git
+git clone https://github.com/Rettend/civ6-mcp.git
 cd civ6-mcp
-uv sync
+uv sync --locked --no-dev --python 3.12
 ```
+
+**Multiplayer:** before entering a match, apply the [memory patch](docs/multiplayer.md#apply-after-each-civ-launch) at the main menu after each Civ launch. It supports one verified Windows Steam DX11 build. LAN host-versus-AI play is tested through turn advancement; synchronization between two real clients remains untested. Single-player needs no patch.
 
 For GUI automation features (screenshot, OCR-based menu navigation):
 
 ```bash
 # macOS
-uv pip install 'civ6-mcp[launcher-macos]'
+uv sync --extra launcher-macos
 
 # Windows (uses built-in Windows OCR — no external binaries needed)
-uv pip install 'civ6-mcp[launcher-windows]'
+uv sync --extra launcher-windows
 
 # Linux (Ubuntu/Debian)
 sudo apt install xdotool tesseract-ocr
-uv pip install 'civ6-mcp[launcher-linux]'
+uv sync --extra launcher-linux
 ```
+
+When using these optional features, also add `--extra launcher-windows` (or your platform's extra) before `civ-mcp` in your client's launch arguments.
 
 ### 3. Test the connection
 
-With Civ 6 running and a game loaded:
+With Civ 6 running and a game loaded, and your MCP client disconnected:
 
 ```bash
 uv run python scripts/test_connection.py
@@ -109,7 +115,7 @@ You should see a successful handshake and a list of Lua states (GameCore_Tuner, 
 
 ### 4. Configure your MCP client
 
-The server runs over stdio. Point your client at it:
+The server runs over stdio. Point your client or agent harness at it, replacing `/path/to/civ6-mcp` with your checkout's absolute path (for example, `C:/Games/civ6-mcp` on Windows):
 
 <details>
 <summary><strong>Claude Code</strong></summary>
@@ -134,7 +140,7 @@ Add to your config file:
   "mcpServers": {
     "civ6": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/civ6-mcp", "civ-mcp"]
+      "args": ["run", "--directory", "/path/to/civ6-mcp", "--locked", "--no-dev", "--python", "3.12", "civ-mcp"]
     }
   }
 }
@@ -149,7 +155,7 @@ Add to `.codex/config.toml` in the project root:
 ```toml
 [mcp_servers.civ6]
 command = "uv"
-args = ["run", "--directory", "/path/to/civ6-mcp", "civ-mcp"]
+args = ["run", "--directory", "/path/to/civ6-mcp", "--locked", "--no-dev", "--python", "3.12", "civ-mcp"]
 ```
 </details>
 
@@ -163,7 +169,7 @@ Add to `.gemini/settings.json` in the project root:
   "mcpServers": {
     "civ6": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/civ6-mcp", "civ-mcp"]
+      "args": ["run", "--directory", "/path/to/civ6-mcp", "--locked", "--no-dev", "--python", "3.12", "civ-mcp"]
     }
   }
 }
@@ -173,10 +179,10 @@ Add to `.gemini/settings.json` in the project root:
 <details>
 <summary><strong>Other MCP clients</strong></summary>
 
-The server speaks stdio JSON-RPC:
+Configure your harness to launch this command as a stdio MCP server from the repository directory:
 
 ```bash
-uv run civ-mcp
+uv run --locked --no-dev --python 3.12 civ-mcp
 ```
 </details>
 
@@ -186,7 +192,7 @@ Load a game in Civ 6, connect your client, and try:
 
 ```
 Play my Civ 6 game. Start by getting an overview, then check units and
-cities, and play through the turn.
+cities, and play through one turn. Verify that the turn advanced, then stop.
 ```
 
 The agent will orient with `get_game_overview`, scan the map for threats, move units, set production and research, handle diplomacy, and end the turn.
@@ -201,7 +207,7 @@ Civilization VI is a compelling environment for evaluating LLM strategic reasoni
 - **Opponent modeling** — reading diplomatic signals, anticipating AI behavior
 - **Strategic adaptation** — responding to threats, shifting priorities mid-game
 
-The MCP interface provides a clean abstraction: the model receives narrated game state as text and responds with tool calls. All game rules are enforced by the engine. A companion web app lets you replay sessions turn by turn.
+The MCP interface provides a clean abstraction: the model receives narrated game state as text and responds with tool calls. All game rules are enforced by the engine. Omniscient replay capture is excluded from gameplay in this fork.
 
 ## How it works
 
@@ -224,7 +230,7 @@ The repo includes an [AGENTS.md](AGENTS.md) playbook (symlinked as `CLAUDE.md` f
 ## Requirements
 
 - **macOS, Windows, or Linux** with Civilization VI (Steam version, Gathering Storm DLC)
-- **Python 3.12+** with [uv](https://docs.astral.sh/uv/)
+- **Git** and [uv](https://docs.astral.sh/uv/) (installs the required Python 3.12)
 - An **MCP client** (Claude Code, Codex, Gemini CLI, or any MCP-compatible client)
 
 ## License

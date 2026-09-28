@@ -302,7 +302,7 @@ for pid = 0, 62 do
             local civName = Locale.Lookup(cfg:GetCivilizationShortDescription())
             for _, c in p:GetCities():Members() do
                 local cx, cy = c:GetX(), c:GetY()
-                if pid == me or pVis:IsRevealed(cx, cy) then
+                if pid == me or pVis:IsVisible(cx, cy) then
                     local cityName = Locale.Lookup(c:GetName())
                     local cityRel = c:GetReligion()
                     local majRel = cityRel:GetMajorityReligion()

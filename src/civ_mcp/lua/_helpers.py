@@ -105,12 +105,44 @@ def _int(s: str) -> int:
 # Interpolate into f-string builders with {_LUA_RES_VISIBLE} etc.
 # ---------------------------------------------------------------------------
 
-# Resource visibility check — expects ``pTech`` in scope.
+# Player-view visibility checks; a visible tile can still contain an invisible unit.
+_LUA_UNIT_VISIBLE = """\
+local function unitVisible(unit)
+    local me = Game.GetLocalPlayer()
+    if unit:GetOwner() == me then return true end
+    local vis = PlayersVisibility[me]
+    if not vis or not vis:IsVisible(unit:GetX(), unit:GetY()) then return false end
+    local ok, visible = pcall(function() return vis:IsUnitVisible(unit) end)
+    return ok and visible == true
+end
+"""
+
 _LUA_RES_VISIBLE = """\
 local function resVisible(resEntry)
-    if not resEntry.PrereqTech then return true end
-    local t = GameInfo.Technologies[resEntry.PrereqTech]
-    return t and pTech:HasTech(t.Index)
+    if not resEntry then return false end
+    local player = Players[Game.GetLocalPlayer()]
+    if not player then return false end
+    local ok, visible = pcall(function()
+        return player:GetResources():IsResourceVisible(resEntry.Index)
+    end)
+    if ok and visible ~= nil then return visible end
+    -- GameCore does not expose every UI method. Respect both data prerequisites.
+    if resEntry.PrereqTech then
+        local t = GameInfo.Technologies[resEntry.PrereqTech]
+        if not t or not player:GetTechs():HasTech(t.Index) then return false end
+    end
+    if resEntry.PrereqCivic then
+        local c = GameInfo.Civics[resEntry.PrereqCivic]
+        if not c or not player:GetCulture():HasCivic(c.Index) then return false end
+    end
+    return true
+end
+local function visibleResourceType(plot)
+    local vis = PlayersVisibility[Game.GetLocalPlayer()]
+    if not plot or not vis or not vis:IsRevealed(plot:GetX(), plot:GetY()) then return -1 end
+    local index = plot:GetResourceType()
+    if index < 0 or not resVisible(GameInfo.Resources[index]) then return -1 end
+    return index
 end"""
 
 # Victory-enabled check — prints VENABLED| lines for each enabled victory type.

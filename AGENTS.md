@@ -1,10 +1,10 @@
 # Civ 6 MCP — Agent Reference
 
-An MCP server connecting to a live Civilization VI game via FireTuner. You can read full game state and issue commands. All commands respect game rules.
+An MCP server connecting to a live Civilization VI game via FireTuner. This fork returns player-view information and structured commands for competitive play. See [README.md](README.md) for setup and [docs/multiplayer.md](docs/multiplayer.md) for the multiplayer patch and tested support.
 
 **You only know what you explicitly query.** A human player passively absorbs the score ticker, religion lens, unit health bars — you have none of that. Information you don't ask for simply doesn't enter your world model. The patterns below exist to compensate for this.
 
-`end_turn` now runs **empire warnings** automatically — alerts for loyalty crises, idle trade routes, gold deficits, resource caps, scoreboard position, and military imbalance. These compensate for the most common blind spots, but don't replace periodic deep checks (victory progress, religion spread, diplomacy).
+`end_turn` runs **empire warnings** automatically for loyalty crises, idle trade routes, gold deficits and resource caps. Private rival telemetry is unavailable in this fork.
 
 ## Coordinate System
 
@@ -64,7 +64,7 @@ Periodic checks worth doing regularly. The game doesn't surface most of this pro
 
 ### Around every 20 turns:
 - `get_diplomacy` — delegations to new civs, friendships with Friendly civs, alliances if eligible
-- `get_victory_progress` — check all 6 victory types, not just your own path
+- `get_victory_progress` — check local victory progress; rival details are currently unavailable
 - `get_religion_spread` — religious victory is invisible without active checking; a rival with majority in most civs is a serious threat
 
 ### Around every 30 turns:
@@ -234,16 +234,9 @@ Wonders — high-production cities can slot these between infrastructure. Use `g
 
 ## District Placement
 
-Use `get_district_advisor(city_id, district_type)` for ranked tiles. Then `set_city_production` with target_x/y.
+Use `get_district_advisor(city_id, district_type)` for native placement-preview adjacency under the loaded rules. Then `set_city_production` with target_x/y. Failed previews are unknown.
 
-| District | Adjacency bonuses |
-|----------|------------------|
-| Campus | +1 per mountain, +1 per 2 jungles, +2 geothermal/reef |
-| Holy Site | +1 per mountain, +1 per 2 forests, +2 natural wonder |
-| Industrial Zone | +1 per mine/quarry, +2 aqueduct |
-| Commercial Hub | +2 adjacent river, +2 harbor |
-| Theater Square | +1 per wonder, +2 Entertainment Complex |
-| Encampment | cannot be adjacent to city center |
+Use `get_district_costs(city_id)` for counts and engine quotes. District production calls include before/after observations in their logged result. Formula eligibility and engine quotes do not independently confirm a discount or an engine refresh.
 
 ## Trade Routes
 
@@ -294,7 +287,7 @@ WC fires synchronously inside `end_turn()` — register votes **before** calling
 
 All victories trigger immediately when the condition is met — they do not wait for a turn boundary or WC session. A rival reaching 20 DVP wins before your next turn. The only counter is stripping DVP at a World Congress *before* they reach 20.
 
-`end_turn` runs a victory proximity scan every turn and a full snapshot every 10 turns. These warnings are the primary signal for invisible victories — worth paying attention to.
+Rival victory warnings and comparative demographics are currently unavailable in the local player-view fork.
 
 ## Game Recovery
 
@@ -316,3 +309,11 @@ get_game_overview                 # verify load
 
 Other tools: `list_saves`, `load_save(index)`, `kill_game`, `launch_game`, `load_save_from_menu(name)`.
 Save names omit extension: `"AutoSave_0221"` not `"AutoSave_0221.Civ6Save"`.
+
+## Development checks
+
+Run the offline suite with `uv run --locked --python 3.12 --group dev pytest -q`.
+The default scope is `tests/`; `scripts/test_*.py` include live FireTuner scripts.
+`tests/test_player_view.py` executes generated Lua against hidden-state fixtures.
+These checks verify query filtering and contracts. Native adjacency, cached district
+prices, refreshes, and cost locking still need comparison with the UI on a disposable save.

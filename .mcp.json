@@ -2,7 +2,7 @@
   "mcpServers": {
     "civ6": {
       "command": "uv",
-      "args": ["run", "--directory", ".", "civ-mcp"]
+      "args": ["run", "--directory", ".", "--locked", "--no-dev", "--python", "3.12", "civ-mcp"]
     }
   }
 }

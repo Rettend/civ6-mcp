@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from civ_mcp.lua._helpers import (
     _LUA_RES_VISIBLE,
+    _LUA_UNIT_VISIBLE,
     SENTINEL,
     _bail,
     _bail_lua,
@@ -22,7 +23,7 @@ from civ_mcp.lua.models import (
 
 def build_units_query() -> str:
     """InGame context: lists all units with upgrade and builder improvement info."""
-    return """
+    return _LUA_UNIT_VISIBLE + "\n" + """
 local id = Game.GetLocalPlayer()
 for i, u in Players[id]:GetUnits():Members() do
     local x, y = u:GetX(), u:GetY()
@@ -72,12 +73,12 @@ for i, u in Players[id]:GetUnits():Members() do
                 for dx = -rng, rng do
                     local tx, ty = x + dx, y + dy
                     local d = Map.GetPlotDistance(x, y, tx, ty)
-                    if d >= 1 and d <= rng then
+                    if d >= 1 and d <= rng and PlayersVisibility[id]:IsVisible(tx, ty) then
                         local plotUnits = Map.GetUnitsAt(tx, ty)
                         if plotUnits then
                             for other in plotUnits:Units() do
                                 local otherOwner = other:GetOwner()
-                                if otherOwner ~= id and (otherOwner == 63 or Players[id]:GetDiplomacy():IsAtWarWith(otherOwner)) then
+                                if otherOwner ~= id and unitVisible(other) and (otherOwner == 63 or Players[id]:GetDiplomacy():IsAtWarWith(otherOwner)) then
                                     -- LOS check for ranged units (d>1): verify the
                                     -- game engine agrees we can actually fire there.
                                     -- Melee (d==1) doesn't need LOS.
@@ -189,6 +190,7 @@ print("{SENTINEL}")
 def build_move_unit(unit_index: int, target_x: int, target_y: int) -> str:
     return f"""
 {_lua_get_unit(unit_index)}
+{_LUA_UNIT_VISIBLE}
 if unit:GetMovesRemaining() <= 0 then
     {_bail("ERR:NO_MOVES|Unit has no movement points remaining this turn. Use skip or wait until next turn.")}
 end
@@ -198,7 +200,10 @@ end
 -- Pre-check: stacking conflict at target tile
 local unitInfo = GameInfo.Units[unit:GetType()]
 local isCivilian = (unitInfo and unitInfo.FormationClass == "FORMATION_CLASS_CIVILIAN")
-local tgtUnits = Map.GetUnitsAt({target_x}, {target_y})
+local tgtUnits = nil
+if PlayersVisibility[me]:IsVisible({target_x}, {target_y}) then
+    tgtUnits = Map.GetUnitsAt({target_x}, {target_y})
+end
 if tgtUnits then
     for other in tgtUnits:Units() do
         if other:GetOwner() == me then
@@ -219,7 +224,7 @@ params[UnitOperationTypes.PARAM_Y] = {target_y}
 local hasHostile = false
 if tgtUnits then
     for other in tgtUnits:Units() do
-        if other:GetOwner() ~= me then hasHostile = true end
+        if other:GetOwner() ~= me and unitVisible(other) then hasHostile = true end
     end
 end
 if hasHostile then
@@ -248,6 +253,10 @@ def build_unit_position_query(
         diag_block = f"""
 -- Diagnose blocked move target
 pcall(function()
+    if not PlayersVisibility[me]:IsVisible({move_target_x}, {move_target_y}) then
+        print("DIAG|FOG|destination not currently visible")
+        return
+    end
     local plot = Map.GetPlot({move_target_x}, {move_target_y})
     if not plot then print("DIAG|UNKNOWN|tile does not exist"); return end
     if plot:IsWater() then
@@ -300,6 +309,10 @@ if u then print("POS|" .. u:GetX() .. "|" .. u:GetY()) else print("POS|GONE") en
 def build_attack_unit(unit_index: int, target_x: int, target_y: int) -> str:
     return f"""
 {_lua_get_unit(unit_index)}
+{_LUA_UNIT_VISIBLE}
+if not PlayersVisibility[me]:IsVisible({target_x}, {target_y}) then
+    {_bail("ERR:TARGET_NOT_VISIBLE")}
+end
 local ux, uy = unit:GetX(), unit:GetY()
 local dist = Map.GetPlotDistance(ux, uy, {target_x}, {target_y})
 -- Find hostile unit on target tile (prefer military over civilian)
@@ -310,7 +323,7 @@ if tgtUnits then
     local fallback = nil
     local fallbackName = "unknown"
     for other in tgtUnits:Units() do
-        if other:GetOwner() ~= me then
+        if other:GetOwner() ~= me and unitVisible(other) then
             local eInfo = GameInfo.Units[other:GetType()]
             local eName = eInfo and eInfo.UnitType or "UNKNOWN"
             local eCombat = eInfo and eInfo.Combat or 0
@@ -442,11 +455,15 @@ def build_attack_followup_query(target_x: int, target_y: int) -> str:
     (GetDistricts, GetMaxDamage) are not available in GameCore.
     """
     return f"""
+if not PlayersVisibility[Game.GetLocalPlayer()]:IsVisible({target_x}, {target_y}) then
+    {_bail("ERR:TARGET_NOT_VISIBLE")}
+end
+{_LUA_UNIT_VISIBLE}
 local found = false
 for i = 0, 63 do
     if Players[i] and Players[i]:IsAlive() then
         for _, u in Players[i]:GetUnits():Members() do
-            if u:GetX() == {target_x} and u:GetY() == {target_y} then
+            if u:GetX() == {target_x} and u:GetY() == {target_y} and unitVisible(u) then
                 local hp = u:GetMaxDamage() - u:GetDamage()
                 local entry = GameInfo.Units[u:GetType()]
                 local name = entry and entry.UnitType or "UNKNOWN"
@@ -500,6 +517,10 @@ def build_combat_estimate_query(unit_index: int, target_x: int, target_y: int) -
     """
     return f"""
 {_lua_get_unit(unit_index)}
+{_LUA_UNIT_VISIBLE}
+if not PlayersVisibility[me]:IsVisible({target_x}, {target_y}) then
+    {_bail("ERR:TARGET_NOT_VISIBLE")}
+end
 local ux, uy = unit:GetX(), unit:GetY()
 local dist = Map.GetPlotDistance(ux, uy, {target_x}, {target_y})
 local unitInfo = GameInfo.Units[unit:GetType()]
@@ -513,7 +534,7 @@ local enemy = nil
 local tgtUnits = Map.GetUnitsAt({target_x}, {target_y})
 if tgtUnits then
     for other in tgtUnits:Units() do
-        if other:GetOwner() ~= me then
+        if other:GetOwner() ~= me and unitVisible(other) then
             local eInfo = GameInfo.Units[other:GetType()]
             local eCombat = eInfo and eInfo.Combat or 0
             if eCombat > 0 or enemy == nil then enemy = other end
@@ -638,7 +659,8 @@ if not isRanged then
         if dx ~= 0 or dy ~= 0 then
             local fx, fy = {target_x} + dx, {target_y} + dy
             if not (fx == ux and fy == uy) then
-                local adjUnits = Map.GetUnitsAt(fx, fy)
+                local adjUnits = nil
+                if PlayersVisibility[me]:IsVisible(fx, fy) then adjUnits = Map.GetUnitsAt(fx, fy) end
                 if adjUnits then
                     for adjU in adjUnits:Units() do
                         if adjU:GetOwner() == me then
@@ -664,10 +686,11 @@ if not isRanged then
     for dy = -1, 1 do for dx = -1, 1 do
         if dx ~= 0 or dy ~= 0 then
             local sx, sy = {target_x} + dx, {target_y} + dy
-            local adjUnits = Map.GetUnitsAt(sx, sy)
+            local adjUnits = nil
+            if PlayersVisibility[me]:IsVisible(sx, sy) then adjUnits = Map.GetUnitsAt(sx, sy) end
             if adjUnits then
                 for adjU in adjUnits:Units() do
-                    if adjU:GetOwner() == enemyOwner and adjU ~= enemy then
+                    if adjU:GetOwner() == enemyOwner and adjU ~= enemy and unitVisible(adjU) then
                         local adjInfo = GameInfo.Units[adjU:GetType()]
                         if adjInfo and (adjInfo.Combat or 0) > 0 then
                             supportBonus = supportBonus + 2
@@ -733,17 +756,16 @@ def parse_combat_estimate(
 
 
 def build_threat_scan_query() -> str:
-    """GameCore: scan for foreign military units visible to the player.
+    """InGame: scan for foreign military units visible to the player.
 
     Scans all players (not just barbarians) but only reports units on tiles
     the player can currently see (PlayersVisibility:IsVisible). No arbitrary
     distance limits — fog of war is the natural filter.
 
-    Uses GameCore context but filters by fog of war — only reports units
-    on tiles the player can currently see (PlayersVisibility:IsVisible).
+    Checks tile visibility and the UI's unit visibility (including stealth).
     Reports owner, HP, combat strength, and distance from nearest friendly position.
     """
-    return """
+    return _LUA_UNIT_VISIBLE + "\n" + """
 local me = Game.GetLocalPlayer()
 local pDiplo = Players[me]:GetDiplomacy()
 local pVis = PlayersVisibility[me]
@@ -771,7 +793,7 @@ for pid = 0, 63 do
         end
         for _, bu in Players[pid]:GetUnits():Members() do
             local bx, by = bu:GetX(), bu:GetY()
-            if bx ~= -9999 and pVis:IsVisible(bx, by) then
+            if bx ~= -9999 and pVis:IsVisible(bx, by) and unitVisible(bu) then
                 local uType = bu:GetType()
                 if uType then
                     local entry = GameInfo.Units[uType]
@@ -1635,11 +1657,12 @@ local me = Game.GetLocalPlayer()
 local vis = PlayersVisibility[me]
 local pTech = Players[me]:GetTechs()
 {_LUA_RES_VISIBLE}
+{_LUA_UNIT_VISIBLE}
 for dy = -r, r do
     for dx = -r, r do
         local x, y = cx + dx, cy + dy
         local plot = Map.GetPlot(x, y)
-        if plot and vis:IsRevealed(plot:GetX(), plot:GetY()) then
+        if plot and vis:IsVisible(plot:GetX(), plot:GetY()) then
             local terrain = GameInfo.Terrains[plot:GetTerrainType()].TerrainType
             local feature = "none"
             local fi = plot:GetFeatureType()
@@ -1667,7 +1690,7 @@ for dy = -r, r do
                 for pid = 0, 63 do
                     if pid ~= me and Players[pid] and Players[pid]:IsAlive() then
                         for _, u in Players[pid]:GetUnits():Members() do
-                            if u:GetX() == x and u:GetY() == y then
+                            if u:GetX() == x and u:GetY() == y and unitVisible(u) then
                                 local entry = GameInfo.Units[u:GetType()]
                                 local nm = entry and entry.UnitType or "UNKNOWN"
                                 local ownerLabel = "Barbarian"
@@ -1750,7 +1773,7 @@ def build_builder_tasks_query() -> str:
     Uses hardcoded resource mapping and terrain heuristics for improvement recommendations.
     Does NOT use CanStartOperation with remote tiles (corrupts engine state → crash).
     """
-    return """
+    return _LUA_RES_VISIBLE + "\n" + """
 local me = Game.GetLocalPlayer()
 local pCities = Players[me]:GetCities()
 
@@ -1818,7 +1841,7 @@ for _, city in pCities:Members() do
             if plot and plot:GetOwner() == me and not plot:IsWater() and not plot:IsMountain() then
                 local distIdx = plot:GetDistrictType()
                 local impIdx = plot:GetImprovementType()
-                local resIdx = plot:GetResourceType()
+                local resIdx = visibleResourceType(plot)
 
                 -- Skip tiles with districts
                 if distIdx < 0 then

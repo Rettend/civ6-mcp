@@ -95,9 +95,8 @@ local totalPlots = Map.GetPlotCount()
 local revLand, totalLand = 0, 0
 for i = 0, totalPlots - 1 do
     local plot = Map.GetPlotByIndex(i)
-    if not plot:IsWater() then
-        totalLand = totalLand + 1
-        if pVis:IsRevealed(plot:GetX(), plot:GetY()) then revLand = revLand + 1 end
+    if pVis:IsRevealed(plot:GetX(), plot:GetY()) and not plot:IsWater() then
+        revLand = revLand + 1
     end
 end
 print("EXPLORE|" .. revLand .. "|" .. totalLand)
@@ -624,54 +623,8 @@ def parse_overview_response(lines: list[str]) -> GameOverview:
 
 
 def build_rival_snapshot_query() -> str:
-    """Lightweight per-rival stats for diary power curves. InGame context.
-
-    Output: one RIVAL| line per met major civ (excluding self).
-    Format: RIVAL|pid|name|score|cities|pop|sci|cul|gold|mil|techs|civics|faith|sciVP|diploVP|resources
-    resources: comma-separated RESOURCE:amount pairs for non-zero stockpiles, e.g. IRON:5,HORSES:2
-    """
-    return (
-        "local me = Game.GetLocalPlayer() "
-        "local pDiplo = Players[me]:GetDiplomacy() "
-        "for i = 0, 62 do "
-        "  if i ~= me and Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() and pDiplo:HasMet(i) then "
-        "    local cfg = PlayerConfigurations[i] "
-        "    local name = Locale.Lookup(cfg:GetCivilizationShortDescription()) "
-        "    local p = Players[i] "
-        "    local score = p:GetScore() "
-        "    local nCities, totalPop = 0, 0 "
-        "    for _, c in p:GetCities():Members() do nCities = nCities + 1; totalPop = totalPop + c:GetPopulation() end "
-        "    local sci = p:GetTechs():GetScienceYield() "
-        "    local cul = p:GetCulture():GetCultureYield() "
-        "    local gold = p:GetTreasury():GetGoldYield() - p:GetTreasury():GetTotalMaintenance() "
-        "    local st = p:GetStats() "
-        "    local mil = st:GetMilitaryStrength() "
-        "    local techs = st:GetNumTechsResearched() "
-        "    local civics = st:GetNumCivicsCompleted() "
-        "    local sciVP = st:GetScienceVictoryPoints() "
-        "    local diploVP = st:GetDiplomaticVictoryPoints() "
-        "    local faith = 0 "
-        "    pcall(function() faith = p:GetReligion():GetFaithBalance() end) "
-        '    local resStr = "" '
-        "    local pRes = p:GetResources() "
-        "    for row in GameInfo.Resources() do "
-        '      if row.ResourceClassType == "RESOURCECLASS_STRATEGIC" then '
-        "        local amt = 0 "
-        "        pcall(function() amt = pRes:GetResourceAmount(row.Index) end) "
-        "        if amt and amt > 0 then "
-        '          local rName = row.ResourceType:gsub("RESOURCE_", "") '
-        '          resStr = resStr .. (resStr ~= "" and "," or "") .. rName .. ":" .. amt '
-        "        end "
-        "      end "
-        "    end "
-        '    print("RIVAL|" .. i .. "|" .. name .. "|" .. score .. "|" .. nCities .. "|" .. totalPop '
-        '      .. "|" .. string.format("%.1f", sci) .. "|" .. string.format("%.1f", cul) '
-        '      .. "|" .. string.format("%.1f", gold) .. "|" .. mil .. "|" .. techs .. "|" .. civics '
-        '      .. "|" .. string.format("%.1f", faith) .. "|" .. sciVP .. "|" .. diploVP .. "|" .. resStr) '
-        "  end "
-        "end "
-        f'print("{SENTINEL}")'
-    )
+    """Private rival telemetry is unavailable, including to end-turn callers."""
+    return f'print("{SENTINEL}")'
 
 
 def parse_rival_snapshot_response(lines: list[str]) -> list[RivalSnapshot]:
@@ -722,7 +675,7 @@ def parse_rival_snapshot_response(lines: list[str]) -> list[RivalSnapshot]:
 def build_diary_full_query() -> str:
     """Single InGame round-trip: full per-turn snapshot for diary JSONL.
 
-    Emits per-player lines (all alive major civs, omniscient):
+    Emits the local player's detailed state only:
         PLAYER|pid|civ|leader|score|cities|pop|sci|cul|gold|goldPT|
               faith|faithPT|favor|favorPT|mil|techsN|civicsN|
               districts|wonders|greatWorks|territory|improvements|
@@ -764,22 +717,22 @@ def build_diary_full_query() -> str:
         "local aliveMajors = {} "
         "local aliveVis = {} "
         "for i = 0, 62 do "
-        "  if Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
+        "  if i == me and Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
         "    aliveMajors[#aliveMajors+1] = i "
         "    aliveVis[i] = PlayersVisibility[i] "
         "  end "
         "end "
         "for idx = 0, Map.GetPlotCount() - 1 do "
         "  local plot = Map.GetPlotByIndex(idx) "
-        "  local owner = plot:GetOwner() "
-        "  if owner >= 0 and owner < 63 then "
+        "  local owner = -1 "
+        "  if PlayersVisibility[me]:IsVisible(plot:GetX(), plot:GetY()) then owner = plot:GetOwner() end "
+        "  if owner == me then "
         "    ownerTerritory[owner] = (ownerTerritory[owner] or 0) + 1 "
         "    if plot:GetImprovementType() >= 0 then "
         "      ownerImprove[owner] = (ownerImprove[owner] or 0) + 1 "
         "    end "
         "  end "
-        "  if not plot:IsWater() then "
-        "    totalLand = totalLand + 1 "
+        "  if PlayersVisibility[me]:IsRevealed(plot:GetX(), plot:GetY()) and not plot:IsWater() then "
         "    local px, py = plot:GetX(), plot:GetY() "
         "    for _, pid in ipairs(aliveMajors) do "
         "      if aliveVis[pid]:IsRevealed(px, py) then "
@@ -794,9 +747,9 @@ def build_diary_full_query() -> str:
         "for b in GameInfo.Buildings() do hashName[b.Hash] = b.BuildingType end "
         "for d in GameInfo.Districts() do hashName[d.Hash] = d.DistrictType end "
         "for pr in GameInfo.Projects() do hashName[pr.Hash] = pr.ProjectType end "
-        # === Player loop (omniscient — all alive major civs) ===
+        # === Local player only ===
         "for i = 0, 62 do "
-        "if Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
+        "if i == me and Players[i] and Players[i]:IsMajor() and Players[i]:IsAlive() then "
         "  local p = Players[i] "
         "  local cfg = PlayerConfigurations[i] "
         "  local civName = Locale.Lookup(cfg:GetCivilizationShortDescription()) "
@@ -946,7 +899,7 @@ def build_diary_full_query() -> str:
         "  end "
         # --- PLAYER line ---
         "  local explorePct = totalLand > 0 "
-        "    and math.floor(100 * (ownerRevealed[i] or 0) / totalLand) or 0 "
+        "    and math.floor(100 * (ownerRevealed[i] or 0) / totalLand) or -1 "
         '  print("PLAYER|" .. i '
         '    .. "|" .. civName .. "|" .. leaderName '
         '    .. "|" .. sScore .. "|" .. nCities .. "|" .. totalPop '
